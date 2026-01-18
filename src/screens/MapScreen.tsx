@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
     View,
     StyleSheet,
@@ -17,6 +17,7 @@ import { usePlaces } from "@/hooks/usePlaces";
 import { useReviews } from "@/hooks/useReviews";
 import { Place, Coordinates } from "@/models/Place";
 import { RATING_COLORS } from "@/utils/constants";
+import { StarRating } from "@/components/StarRating";
 import { MapScreenNavigationProp } from "@/types/navigation";
 import { theme } from "@/utils/theme";
 import { RouteProp } from "@react-navigation/native";
@@ -25,6 +26,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { services, supabaseClient } from "@/config/services";
 import { useFocusEffect } from "@react-navigation/native";
 import { useGroups } from "@/hooks/useGroups";
+import { PlaceBottomSheet } from "@/components/PlaceBottomSheet";
+import { getCategoryInfo, getCategoryIcon, getCategoryColor, PLACE_CATEGORIES } from "@/utils/placeCategories";
 
 type MapScreenRouteProp = RouteProp<RootStackParamList, "Map">;
 
@@ -35,6 +38,7 @@ interface Props {
 
 export function MapScreen({ navigation, route }: Props) {
     const selectedGroupId = route?.params?.groupId;
+    const mapRef = useRef<MapView>(null);
     const [location, setLocation] = useState<Coordinates | null>(null);
     const [places, setPlaces] = useState<Place[]>([]);
     const [allPlaces, setAllPlaces] = useState<Place[]>([]); // Todos los lugares sin filtrar
@@ -45,10 +49,15 @@ export function MapScreen({ navigation, route }: Props) {
         useState<Coordinates | null>(null);
     const [newPlaceName, setNewPlaceName] = useState("");
     const [newPlaceAddress, setNewPlaceAddress] = useState("");
+    const [newPlaceCategory, setNewPlaceCategory] = useState<string>("");
     const [loadingAddress, setLoadingAddress] = useState(false);
     const [isMarkerBeingPressed, setIsMarkerBeingPressed] = useState(false);
     const [minRating, setMinRating] = useState<number | null>(null);
+    const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
     const [showFilterModal, setShowFilterModal] = useState(false);
+    const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
+    const [showPlaceSheet, setShowPlaceSheet] = useState(false);
+    const [isAddingPlace, setIsAddingPlace] = useState(false);
     const {
         getNearbyPlaces,
         searchPlaces,
@@ -58,6 +67,7 @@ export function MapScreen({ navigation, route }: Props) {
     } = usePlaces();
     const { getPlaceReviewSummary } = useReviews();
     const { getUserGroups } = useGroups();
+    const [selectedGroupName, setSelectedGroupName] = useState<string | null>(null);
 
     useEffect(() => {
         (async () => {
@@ -102,73 +112,104 @@ export function MapScreen({ navigation, route }: Props) {
         })();
     }, [selectedGroupId]);
 
-    // Filtrar lugares por rating cuando cambia minRating
+    // Filtrar lugares por rating y categoría
     useEffect(() => {
-        if (minRating === null) {
-            setPlaces(allPlaces);
-        } else {
-            // Filtrar lugares usando average_rating que ya viene en el objeto Place
-            const filtered = allPlaces.filter((place) => {
+        let filtered = allPlaces;
+
+        // Filtrar por rating
+        if (minRating !== null) {
+            filtered = filtered.filter((place) => {
                 if (!place.average_rating) return false;
                 return place.average_rating >= minRating;
             });
-            setPlaces(filtered);
-            console.log(`🔍 Filtrado: ${filtered.length} lugares con ${minRating}+ estrellas de ${allPlaces.length} totales`);
         }
-    }, [minRating, allPlaces]);
+
+        // Filtrar por categoría
+        if (selectedCategory !== null) {
+            filtered = filtered.filter((place) => {
+                return place.category === selectedCategory;
+            });
+        }
+
+        setPlaces(filtered);
+    }, [minRating, selectedCategory, allPlaces]);
+
+    const loadPlacesForGroup = useCallback(async () => {
+        if (!location || !selectedGroupId) return;
+
+        try {
+            const savedPlaces = await getPlacesWithReviews(selectedGroupId);
+            // Fusionar con lugares existentes para evitar perder lugares nuevos temporalmente
+            setAllPlaces(prevPlaces => {
+                // Crear un mapa de lugares por ID para evitar duplicados
+                const placesMap = new Map<string, Place>();
+                // Primero agregar lugares existentes (mantener lugares nuevos temporalmente)
+                prevPlaces.forEach(place => {
+                    if (place.id) {
+                        placesMap.set(place.id, place);
+                    }
+                });
+                // Luego agregar/actualizar con lugares de la BD (prioridad a la BD)
+                savedPlaces.forEach(place => {
+                    if (place.id) {
+                        placesMap.set(place.id, place);
+                    }
+                });
+                return Array.from(placesMap.values());
+            });
+            // El filtro se aplicará automáticamente en el useEffect que depende de allPlaces
+        } catch (error) {
+            console.error("Error al cargar lugares del grupo:", error);
+        }
+    }, [location, selectedGroupId, getPlacesWithReviews]);
 
     // Recargar lugares cuando cambia el grupo seleccionado
     useEffect(() => {
         if (location && selectedGroupId) {
             loadPlacesForGroup();
         }
-    }, [selectedGroupId]);
+    }, [selectedGroupId, loadPlacesForGroup, location]);
 
     // Recargar lugares cuando se vuelve a la pantalla
+    // Recargar con un pequeño delay para asegurar que la BD esté actualizada después de crear reviews
     useFocusEffect(
         useCallback(() => {
             if (location) {
                 if (selectedGroupId) {
-                    loadPlacesForGroup();
+                    // Recargar con delay para dar tiempo a que las suscripciones en tiempo real se actualicen
+                    const timeoutId = setTimeout(() => {
+                        loadPlacesForGroup();
+                    }, 500);
+                    return () => clearTimeout(timeoutId);
                 } else {
                     // Recargar lugares sin grupo
                     (async () => {
                         try {
                             const savedPlaces = await getPlacesWithReviews();
                             setAllPlaces(savedPlaces);
-                            setPlaces(savedPlaces);
                         } catch (error) {
                             // Silenciar error
                         }
                     })();
                 }
             }
-        }, [location, selectedGroupId, getPlacesWithReviews])
+        }, [location, selectedGroupId, getPlacesWithReviews, loadPlacesForGroup])
     );
 
-    const loadPlacesForGroup = async () => {
-        if (!location || !selectedGroupId) return;
-
-        try {
-            console.log("📍 Cargando lugares del grupo:", selectedGroupId);
-            const savedPlaces = await getPlacesWithReviews(selectedGroupId);
-            setAllPlaces(savedPlaces);
-            setPlaces(savedPlaces);
-        } catch (error) {
-            console.error("Error al cargar lugares del grupo:", error);
-        }
-    };
-
-    // Validar que el grupo existe cuando se navega con groupId
+    // Validar que el grupo existe y cargar su nombre cuando se navega con groupId
     useEffect(() => {
-        if (!selectedGroupId) return;
+        if (!selectedGroupId) {
+            setSelectedGroupName(null);
+            return;
+        }
 
-        const validateGroup = async () => {
+        const validateAndLoadGroup = async () => {
             try {
                 const userGroups = await getUserGroups();
-                const groupExists = userGroups.some(g => g.id === selectedGroupId);
+                const group = userGroups.find(g => g.id === selectedGroupId);
                 
-                if (!groupExists) {
+                if (!group) {
+                    // El grupo no existe, mostrar alerta
                     Alert.alert(
                         "Grupo no encontrado",
                         "Este grupo ya no existe o no tienes acceso a él.",
@@ -179,13 +220,18 @@ export function MapScreen({ navigation, route }: Props) {
                             },
                         ]
                     );
+                    setSelectedGroupName(null);
+                } else {
+                    // Cargar el nombre del grupo
+                    setSelectedGroupName(group.name);
                 }
             } catch (error) {
                 // Si hay error, no hacer nada (puede ser un problema temporal)
+                setSelectedGroupName(null);
             }
         };
 
-        validateGroup();
+        validateAndLoadGroup();
     }, [selectedGroupId, getUserGroups, navigation]);
 
     // Suscripción en tiempo real a cambios en places, reviews y grupos
@@ -207,8 +253,11 @@ export function MapScreen({ navigation, route }: Props) {
                     // Invalidar cache y recargar lugares cuando hay cambios en reviews
                     const { cache, cacheKeys } = require('@/utils/cache');
                     cache.invalidateCache(cacheKeys.placesWithReviews(selectedGroupId));
+                    // Recargar con delay para asegurar que la BD esté completamente actualizada
                     if (location) {
-                        loadPlacesForGroup();
+                        setTimeout(() => {
+                            loadPlacesForGroup();
+                        }, 500);
                     }
                 }
             )
@@ -228,8 +277,11 @@ export function MapScreen({ navigation, route }: Props) {
                     // Invalidar cache y recargar lugares cuando hay cambios en places
                     const { cache, cacheKeys } = require('@/utils/cache');
                     cache.invalidateCache(cacheKeys.placesWithReviews(selectedGroupId));
+                    // Recargar lugares después de un pequeño delay para asegurar que la BD esté actualizada
                     if (location) {
-                        loadPlacesForGroup();
+                        setTimeout(() => {
+                            loadPlacesForGroup();
+                        }, 300);
                     }
                 }
             )
@@ -280,29 +332,56 @@ export function MapScreen({ navigation, route }: Props) {
         setShowAddPlaceModal(false);
         setSearchResults([]);
         
-        // Navegar directamente sin delay
-        navigation.navigate("PlaceDetail", {
-            placeId: place.id,
-            ...(selectedGroupId ? { groupId: selectedGroupId } : {}),
-        });
+        // Mostrar bottom sheet estilo iOS Maps
+        setSelectedPlace(place);
+        setShowPlaceSheet(true);
         
-        // Resetear después de navegar
+        // Resetear después de un momento
         setTimeout(() => {
             setIsMarkerBeingPressed(false);
-        }, 1000);
+        }, 300);
+    };
+
+    const handlePlaceSheetPress = () => {
+        if (!selectedPlace) return;
+        setShowPlaceSheet(false);
+        navigation.navigate("PlaceDetail", {
+            placeId: selectedPlace.id,
+            ...(selectedGroupId ? { groupId: selectedGroupId } : {}),
+        });
     };
 
     const handleMapPress = async (e: any) => {
-        // Si se está presionando un marker, no abrir modal
-        if (isMarkerBeingPressed) {
+        // Si se está presionando un marker o hay un sheet abierto, no hacer nada
+        if (isMarkerBeingPressed || showPlaceSheet || showAddPlaceModal) {
             return;
         }
+    };
+
+    const handleAddPlaceButton = async () => {
+        if (!location) return;
         
-        const coord: Coordinates = e.nativeEvent.coordinate;
+        // Cerrar bottom sheet si está abierto
+        setShowPlaceSheet(false);
+        setSelectedPlace(null);
+        
+        // Activar modo de selección tipo Uber
+        setIsAddingPlace(true);
+        const coord: Coordinates = location;
         setSelectedCoordinate(coord);
         setNewPlaceName("");
         setNewPlaceAddress("");
-        setShowAddPlaceModal(true);
+        setNewPlaceCategory("");
+        
+        // Mover el mapa a la ubicación actual del usuario
+        if (mapRef.current) {
+            mapRef.current.animateToRegion({
+                latitude: coord.latitude,
+                longitude: coord.longitude,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+            }, 500);
+        }
         
         // Obtener dirección automáticamente usando reverse geocoding
         setLoadingAddress(true);
@@ -316,6 +395,36 @@ export function MapScreen({ navigation, route }: Props) {
         } finally {
             setLoadingAddress(false);
         }
+    };
+
+    const handleMapRegionChange = async (region: any) => {
+        if (isAddingPlace && region) {
+            // Actualizar coordenadas cuando el usuario mueve el mapa
+            const coord: Coordinates = {
+                latitude: region.latitude,
+                longitude: region.longitude,
+            };
+            setSelectedCoordinate(coord);
+            
+            // Obtener dirección automáticamente usando reverse geocoding
+            setLoadingAddress(true);
+            try {
+                const address = await services.map.reverseGeocode(coord);
+                if (address && address.trim()) {
+                    setNewPlaceAddress(address);
+                }
+            } catch (error) {
+                // Silenciar error
+            } finally {
+                setLoadingAddress(false);
+            }
+        }
+    };
+
+    const handleConfirmLocation = () => {
+        if (!selectedCoordinate) return;
+        setIsAddingPlace(false);
+        setShowAddPlaceModal(true);
     };
 
     // Búsqueda con debounce para búsqueda en tiempo real
@@ -414,12 +523,18 @@ export function MapScreen({ navigation, route }: Props) {
             return;
         }
 
+        if (!newPlaceCategory) {
+            Alert.alert("Error", "Por favor selecciona una categoría");
+            return;
+        }
+
         try {
             const newPlace = await savePlace({
                 name: newPlaceName,
                 address: newPlaceAddress || undefined, // No guardar si está vacía
                 latitude: selectedCoordinate.latitude,
                 longitude: selectedCoordinate.longitude,
+                category: newPlaceCategory,
             });
 
             // Agregar a la lista de lugares
@@ -429,6 +544,7 @@ export function MapScreen({ navigation, route }: Props) {
             setShowAddPlaceModal(false);
             setNewPlaceName("");
             setNewPlaceAddress("");
+            setNewPlaceCategory("");
 
             // Navegar al detalle del lugar para agregar review (pasar groupId si hay uno seleccionado)
             navigation.navigate("PlaceDetail", {
@@ -453,6 +569,7 @@ export function MapScreen({ navigation, route }: Props) {
     return (
         <View style={styles.container}>
             <MapView
+                ref={mapRef}
                 provider={PROVIDER_DEFAULT}
                 style={styles.map}
                 initialRegion={{
@@ -461,7 +578,8 @@ export function MapScreen({ navigation, route }: Props) {
                     latitudeDelta: 0.05,
                     longitudeDelta: 0.05,
                 }}
-                onPress={isMarkerBeingPressed ? undefined : handleMapPress}
+                onPress={handleMapPress}
+                onRegionChangeComplete={handleMapRegionChange}
                 showsUserLocation={true}
                 showsMyLocationButton={true}
             >
@@ -471,11 +589,9 @@ export function MapScreen({ navigation, route }: Props) {
                         (place) => place.id && place.latitude && place.longitude
                     )
                     .map((place, index) => {
-                        const avgRating = place.average_rating || 0;
-                        const roundedRating = Math.round(avgRating);
-                        const pinColor = roundedRating > 0 
-                            ? RATING_COLORS[roundedRating] || RATING_COLORS[3]
-                            : RATING_COLORS[3];
+                        const categoryInfo = getCategoryInfo(place.category);
+                        const categoryColor = getCategoryColor(place.category);
+                        const categoryIcon = getCategoryIcon(place.category);
                         
                         return (
                             <Marker
@@ -488,20 +604,20 @@ export function MapScreen({ navigation, route }: Props) {
                                     latitude: place.latitude,
                                     longitude: place.longitude,
                                 }}
-                                title={place.name}
-                                description={place.address || ''}
                                 onPress={() => {
                                     handleMarkerPress(place);
                                 }}
                                 tappable={true}
                                 tracksViewChanges={false}
                             >
-                                {/* Componente personalizado con puntaje */}
+                                {/* Componente personalizado con icono de categoría */}
                                 <View style={styles.customMarker}>
-                                    <View style={[styles.markerPin, { backgroundColor: pinColor }]}>
-                                        <Text style={styles.markerRating}>
-                                            {avgRating > 0 ? avgRating.toFixed(1) : '?'}
-                                        </Text>
+                                    <View style={[styles.markerPin, { backgroundColor: categoryColor }]}>
+                                        <Ionicons 
+                                            name={categoryIcon} 
+                                            size={24} 
+                                            color="#FFFFFF" 
+                                        />
                                     </View>
                                 </View>
                             </Marker>
@@ -524,65 +640,68 @@ export function MapScreen({ navigation, route }: Props) {
                                 latitude: place.latitude,
                                 longitude: place.longitude,
                             }}
-                            title={place.name}
-                            description={
-                                place.distance
-                                    ? `${place.distance.toFixed(1)} km`
-                                    : place.address
-                            }
                             onPress={() => handleSelectSearchResult(place)}
                             tappable={true}
                             pinColor={theme.colors.accent}
                         />
                     ))}
+
+                {/* Marcador fijo en el centro para selección tipo Uber */}
+                {isAddingPlace && selectedCoordinate && (
+                    <View style={styles.centerMarkerContainer}>
+                        <View style={styles.centerMarker} />
+                        <View style={styles.centerMarkerDot} />
+                    </View>
+                )}
             </MapView>
 
-            {/* Indicador de grupo activo */}
-            {selectedGroupId && (
-                <View style={styles.groupIndicator}>
-                    <Ionicons name="people" size={16} color="#FFFFFF" />
-                    <Text style={styles.groupIndicatorText}>
-                        Mostrando reviews del grupo
-                    </Text>
+            {/* Botón de confirmar ubicación cuando está en modo agregar lugar */}
+            {isAddingPlace && (
+                <View style={styles.confirmLocationContainer}>
+                    <View style={styles.confirmLocationContent}>
+                        <Text style={styles.confirmLocationText} numberOfLines={2}>
+                            {newPlaceAddress || 'Mueve el mapa para seleccionar ubicación'}
+                        </Text>
+                        <View style={styles.confirmLocationButtons}>
+                            <TouchableOpacity
+                                style={styles.confirmLocationCancel}
+                                onPress={() => {
+                                    setIsAddingPlace(false);
+                                    setSelectedCoordinate(null);
+                                    setNewPlaceAddress("");
+                                }}
+                                activeOpacity={0.7}
+                            >
+                                <Text style={styles.confirmLocationCancelText}>Cancelar</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={styles.confirmLocationButton}
+                                onPress={handleConfirmLocation}
+                                activeOpacity={0.7}
+                            >
+                                <Text style={styles.confirmLocationButtonText}>Confirmar</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
                 </View>
             )}
 
-            {/* Barra de búsqueda mejorada */}
-            <View style={styles.searchContainer}>
-                <View style={styles.searchInputContainer}>
-                    <Ionicons
-                        name="search"
-                        size={20}
-                        color={theme.colors.textSecondary}
-                        style={styles.searchIcon}
-                    />
-                    <TextInput
-                        style={styles.searchInput}
-                        placeholder="Buscar lugares..."
-                        placeholderTextColor={theme.colors.textSecondary}
-                        value={searchQuery}
-                        onChangeText={setSearchQuery}
-                        onSubmitEditing={handleSearch}
-                        returnKeyType="search"
-                        autoCorrect={false}
-                        autoCapitalize="none"
-                    />
-                    {searchQuery.trim() && (
-                        <TouchableOpacity
-                            style={styles.clearButton}
-                            onPress={() => {
-                                setSearchQuery("");
-                                setSearchResults([]);
-                            }}
-                        >
-                            <Ionicons
-                                name="close-circle"
-                                size={20}
-                                color={theme.colors.textSecondary}
-                            />
-                        </TouchableOpacity>
-                    )}
-                </View>
+            {/* Indicador de grupo activo - solo mostrar nombre si hay grupo y no hay bottom sheet */}
+            {selectedGroupId && selectedGroupName && !showPlaceSheet && (
+                <TouchableOpacity 
+                    style={styles.groupIndicator}
+                    onPress={() => navigation.navigate("GroupsList")}
+                    activeOpacity={0.8}
+                >
+                    <Ionicons name="arrow-back" size={16} color={theme.colors.text} />
+                    <Text style={styles.groupIndicatorText}>
+                        {selectedGroupName}
+                    </Text>
+                </TouchableOpacity>
+            )}
+
+            {/* Botón de filtros */}
+            <View style={styles.filterContainer}>
                 <TouchableOpacity
                     style={styles.filterButton}
                     onPress={() => setShowFilterModal(true)}
@@ -591,7 +710,7 @@ export function MapScreen({ navigation, route }: Props) {
                         name="options"
                         size={20}
                         color={
-                            minRating
+                            minRating || selectedCategory
                                 ? theme.colors.primary
                                 : theme.colors.textSecondary
                         }
@@ -681,32 +800,17 @@ export function MapScreen({ navigation, route }: Props) {
                 </View>
             )}
 
-            {/* Controles inferiores mejorados */}
-            <View style={styles.controls}>
+            {/* Botón discreto de Grupos en esquina superior derecha */}
+            {!selectedGroupId && (
                 <TouchableOpacity
-                    style={[styles.button, styles.buttonSecondary]}
-                    onPress={() =>
-                        navigation.navigate(
-                            "PlacesList",
-                            selectedGroupId
-                                ? { groupId: selectedGroupId }
-                                : undefined
-                        )
-                    }
-                    activeOpacity={0.8}
-                >
-                    <Ionicons name="list" size={20} color="#FFFFFF" />
-                    <Text style={styles.buttonText}>Reviews</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                    style={styles.button}
+                    style={styles.groupsButton}
                     onPress={() => navigation.navigate("GroupsList")}
-                    activeOpacity={0.8}
+                    activeOpacity={0.7}
                 >
-                    <Ionicons name="people" size={20} color="#FFFFFF" />
-                    <Text style={styles.buttonText}>Grupos</Text>
+                    <Ionicons name="folder-outline" size={20} color={theme.colors.text} />
                 </TouchableOpacity>
-            </View>
+            )}
+
 
             {/* Modal de filtros */}
             <Modal
@@ -718,9 +822,7 @@ export function MapScreen({ navigation, route }: Props) {
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalContent}>
                         <View style={styles.modalHeader}>
-                            <Text style={styles.modalTitle}>
-                                Filtrar por Puntaje
-                            </Text>
+                            <Text style={styles.modalTitle}>Filtros</Text>
                             <TouchableOpacity
                                 onPress={() => setShowFilterModal(false)}
                                 style={styles.modalCloseButton}
@@ -732,53 +834,100 @@ export function MapScreen({ navigation, route }: Props) {
                                 />
                             </TouchableOpacity>
                         </View>
-                        <View style={styles.filterOptions}>
-                            <TouchableOpacity
-                                style={[
-                                    styles.filterOption,
-                                    minRating === null &&
-                                        styles.filterOptionActive,
-                                ]}
-                                onPress={() => {
-                                    setMinRating(null);
-                                    setShowFilterModal(false);
-                                }}
-                            >
-                                <Text
-                                    style={[
-                                        styles.filterOptionText,
-                                        minRating === null &&
-                                            styles.filterOptionTextActive,
-                                    ]}
+                        
+                        <ScrollView showsVerticalScrollIndicator={false} style={styles.filterScrollView}>
+                            {/* Filtro por puntaje */}
+                            <View style={styles.filterSection}>
+                                <Text style={styles.filterSectionTitle}>Puntaje</Text>
+                                <ScrollView 
+                                    horizontal 
+                                    showsHorizontalScrollIndicator={false}
+                                    contentContainerStyle={styles.filterRow}
                                 >
-                                    Todos
-                                </Text>
-                            </TouchableOpacity>
-                            {[1, 2, 3, 4, 5].map((rating) => (
-                                <TouchableOpacity
-                                    key={rating}
-                                    style={[
-                                        styles.filterOption,
-                                        minRating === rating &&
-                                            styles.filterOptionActive,
-                                    ]}
-                                    onPress={() => {
-                                        setMinRating(rating);
-                                        setShowFilterModal(false);
-                                    }}
-                                >
-                                    <Text
+                                    <TouchableOpacity
                                         style={[
-                                            styles.filterOptionText,
-                                            minRating === rating &&
-                                                styles.filterOptionTextActive,
+                                            styles.filterChip,
+                                            minRating === null && styles.filterChipActive,
                                         ]}
+                                        onPress={() => setMinRating(null)}
                                     >
-                                        {rating}+ estrellas
-                                    </Text>
-                                </TouchableOpacity>
-                            ))}
-                        </View>
+                                        <Text style={[
+                                            styles.filterChipText,
+                                            minRating === null && styles.filterChipTextActive,
+                                        ]}>
+                                            Todos
+                                        </Text>
+                                    </TouchableOpacity>
+                                    {[1, 2, 3, 4, 5].map((rating) => (
+                                        <TouchableOpacity
+                                            key={rating}
+                                            style={[
+                                                styles.filterChip,
+                                                minRating === rating && styles.filterChipActive,
+                                            ]}
+                                            onPress={() => setMinRating(rating)}
+                                        >
+                                            <StarRating rating={rating} readonly size={14} />
+                                            <Text style={[
+                                                styles.filterChipText,
+                                                minRating === rating && styles.filterChipTextActive,
+                                            ]}>
+                                                {rating}+
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                </ScrollView>
+                            </View>
+
+                            {/* Filtro por categoría */}
+                            <View style={styles.filterSection}>
+                                <Text style={styles.filterSectionTitle}>Categoría</Text>
+                                <View style={styles.filterGrid}>
+                                    <TouchableOpacity
+                                        style={[
+                                            styles.filterCategoryChip,
+                                            selectedCategory === null && styles.filterCategoryChipActive,
+                                        ]}
+                                        onPress={() => setSelectedCategory(null)}
+                                    >
+                                        <Text style={[
+                                            styles.filterCategoryText,
+                                            selectedCategory === null && styles.filterCategoryTextActive,
+                                        ]}>
+                                            Todas
+                                        </Text>
+                                    </TouchableOpacity>
+                                    {PLACE_CATEGORIES.map((category) => (
+                                        <TouchableOpacity
+                                            key={category.id}
+                                            style={[
+                                                styles.filterCategoryChip,
+                                                selectedCategory === category.id && {
+                                                    borderColor: category.color,
+                                                    backgroundColor: category.color + '15',
+                                                },
+                                            ]}
+                                            onPress={() => setSelectedCategory(category.id)}
+                                        >
+                                            <Ionicons 
+                                                name={category.icon} 
+                                                size={18} 
+                                                color={selectedCategory === category.id ? category.color : theme.colors.textSecondary} 
+                                            />
+                                            <Text style={[
+                                                styles.filterCategoryText,
+                                                selectedCategory === category.id && {
+                                                    color: category.color,
+                                                    fontWeight: '600',
+                                                },
+                                            ]}>
+                                                {category.name}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            </View>
+                        </ScrollView>
                     </View>
                 </View>
             </Modal>
@@ -799,8 +948,10 @@ export function MapScreen({ navigation, route }: Props) {
                             <TouchableOpacity
                                 onPress={() => {
                                     setShowAddPlaceModal(false);
+                                    setIsAddingPlace(false);
                                     setNewPlaceName("");
                                     setNewPlaceAddress("");
+                                    setNewPlaceCategory("");
                                 }}
                                 style={styles.modalCloseButton}
                             >
@@ -853,6 +1004,44 @@ export function MapScreen({ navigation, route }: Props) {
                             </View>
                         ) : null}
 
+                        {/* Selector de categoría */}
+                        <Text style={styles.categoryLabel}>Categoría *</Text>
+                        <ScrollView 
+                            horizontal 
+                            showsHorizontalScrollIndicator={false}
+                            style={styles.categoriesContainer}
+                            contentContainerStyle={styles.categoriesContent}
+                        >
+                            {PLACE_CATEGORIES.map((category) => (
+                                <TouchableOpacity
+                                    key={category.id}
+                                    style={[
+                                        styles.categoryOption,
+                                        newPlaceCategory === category.id && styles.categoryOptionSelected,
+                                    ]}
+                                    onPress={() => setNewPlaceCategory(category.id)}
+                                    activeOpacity={0.7}
+                                >
+                                    <View style={[
+                                        styles.categoryIconContainer,
+                                        newPlaceCategory === category.id && { backgroundColor: category.color + '20' }
+                                    ]}>
+                                        <Ionicons 
+                                            name={category.icon} 
+                                            size={24} 
+                                            color={newPlaceCategory === category.id ? category.color : theme.colors.textSecondary} 
+                                        />
+                                    </View>
+                                    <Text style={[
+                                        styles.categoryOptionText,
+                                        newPlaceCategory === category.id && styles.categoryOptionTextSelected,
+                                    ]}>
+                                        {category.name}
+                                    </Text>
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+
                         <View style={styles.modalButtons}>
                             <TouchableOpacity
                                 style={[
@@ -861,8 +1050,10 @@ export function MapScreen({ navigation, route }: Props) {
                                 ]}
                                 onPress={() => {
                                     setShowAddPlaceModal(false);
+                                    setIsAddingPlace(false);
                                     setNewPlaceName("");
                                     setNewPlaceAddress("");
+                                    setNewPlaceCategory("");
                                 }}
                                 activeOpacity={0.7}
                             >
@@ -894,6 +1085,40 @@ export function MapScreen({ navigation, route }: Props) {
                         color={theme.colors.primary}
                     />
                 </View>
+            )}
+
+            {/* Bottom Sheet estilo iOS Maps */}
+            {showPlaceSheet && selectedPlace && (
+                <PlaceBottomSheet
+                    place={selectedPlace}
+                    onClose={() => {
+                        setShowPlaceSheet(false);
+                        setSelectedPlace(null);
+                    }}
+                    onPress={handlePlaceSheetPress}
+                    onAddReview={() => {
+                        if (selectedPlace) {
+                            setShowPlaceSheet(false);
+                            navigation.navigate("AddReview", {
+                                placeId: selectedPlace.id,
+                                placeName: selectedPlace.name,
+                                ...(selectedGroupId ? { groupId: selectedGroupId } : {}),
+                            });
+                        }
+                    }}
+                    groupId={selectedGroupId}
+                />
+            )}
+
+            {/* Botón flotante discreto para agregar lugar */}
+            {!showPlaceSheet && (
+                <TouchableOpacity
+                    style={styles.addPlaceButton}
+                    onPress={handleAddPlaceButton}
+                    activeOpacity={0.8}
+                >
+                    <Ionicons name="add" size={28} color="#FFFFFF" />
+                </TouchableOpacity>
             )}
         </View>
     );
@@ -961,7 +1186,7 @@ const styles = StyleSheet.create({
         top: Platform.OS === "ios" ? 60 : 30,
         left: theme.spacing.md,
         right: theme.spacing.md,
-        backgroundColor: theme.colors.accent,
+        backgroundColor: theme.colors.surface,
         borderRadius: theme.borderRadius.lg,
         paddingVertical: theme.spacing.sm,
         paddingHorizontal: theme.spacing.md,
@@ -970,10 +1195,12 @@ const styles = StyleSheet.create({
         gap: theme.spacing.xs,
         ...theme.shadows.md,
         zIndex: 10,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.border,
     },
     groupIndicatorText: {
         ...theme.typography.caption,
-        color: "#FFFFFF",
+        color: theme.colors.text,
         fontWeight: "600",
     },
     searchContainer: {
@@ -1010,6 +1237,12 @@ const styles = StyleSheet.create({
         padding: theme.spacing.xs,
         marginLeft: theme.spacing.xs,
     },
+    filterContainer: {
+        position: "absolute",
+        top: Platform.OS === "ios" ? 100 : 70,
+        right: theme.spacing.md,
+        zIndex: 5,
+    },
     filterButton: {
         width: 48,
         height: 48,
@@ -1019,6 +1252,7 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         borderWidth: StyleSheet.hairlineWidth,
         borderColor: theme.colors.border,
+        ...theme.shadows.md,
     },
     searchResults: {
         position: "absolute",
@@ -1189,46 +1423,264 @@ const styles = StyleSheet.create({
         ...theme.typography.bodyBold,
         color: "#FFFFFF",
     },
+    categoryLabel: {
+        ...theme.typography.bodyBold,
+        color: theme.colors.text,
+        marginBottom: theme.spacing.sm,
+        marginTop: theme.spacing.xs,
+    },
+    categoriesContainer: {
+        marginBottom: theme.spacing.md,
+    },
+    categoriesContent: {
+        paddingRight: theme.spacing.md,
+        gap: theme.spacing.sm,
+    },
+    categoryOption: {
+        alignItems: "center",
+        marginRight: theme.spacing.sm,
+        padding: theme.spacing.sm,
+        borderRadius: theme.borderRadius.lg,
+        borderWidth: 2,
+        borderColor: theme.colors.border,
+        minWidth: 80,
+    },
+    categoryOptionSelected: {
+        borderColor: theme.colors.primary,
+        backgroundColor: theme.colors.primary + '10',
+    },
+    categoryIconContainer: {
+        width: 48,
+        height: 48,
+        borderRadius: theme.borderRadius.md,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: theme.colors.background,
+        marginBottom: theme.spacing.xs,
+    },
+    categoryOptionText: {
+        ...theme.typography.caption,
+        color: theme.colors.textSecondary,
+        textAlign: "center",
+        fontSize: 12,
+    },
+    categoryOptionTextSelected: {
+        color: theme.colors.primary,
+        fontWeight: "600",
+    },
     filterOptions: {
         gap: theme.spacing.sm,
     },
-    filterOption: {
-        padding: theme.spacing.md,
-        borderRadius: theme.borderRadius.md,
+    filterScrollView: {
+        maxHeight: 400,
+    },
+    filterSection: {
+        marginBottom: theme.spacing.xl,
+    },
+    filterSectionTitle: {
+        ...theme.typography.bodyBold,
+        color: theme.colors.text,
+        marginBottom: theme.spacing.md,
+        fontSize: 16,
+        fontWeight: '600',
+    },
+    filterRow: {
+        flexDirection: 'row',
+        gap: theme.spacing.sm,
+        paddingRight: theme.spacing.lg,
+    },
+    filterChip: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.xs,
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.sm,
+        borderRadius: theme.borderRadius.lg,
         backgroundColor: theme.colors.background,
         borderWidth: 1,
         borderColor: theme.colors.border,
     },
-    filterOptionActive: {
+    filterChipActive: {
         backgroundColor: theme.colors.primary,
         borderColor: theme.colors.primary,
     },
-    filterOptionText: {
+    filterChipText: {
         ...theme.typography.body,
         color: theme.colors.text,
+        fontSize: 14,
     },
-    filterOptionTextActive: {
-        color: "#FFFFFF",
+    filterChipTextActive: {
+        color: '#FFFFFF',
+        fontWeight: '600',
+    },
+    filterGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: theme.spacing.sm,
+    },
+    filterCategoryChip: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.xs,
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.sm,
+        borderRadius: theme.borderRadius.lg,
+        backgroundColor: theme.colors.background,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        minWidth: 100,
+    },
+    filterCategoryChipActive: {
+        borderColor: theme.colors.primary,
+        backgroundColor: theme.colors.primary + '15',
+    },
+    filterCategoryText: {
+        ...theme.typography.caption,
+        color: theme.colors.text,
+        fontSize: 13,
+    },
+    filterCategoryTextActive: {
+        color: theme.colors.primary,
+        fontWeight: '600',
+    },
+    groupsButton: {
+        position: 'absolute',
+        top: Platform.OS === 'ios' ? 60 : 30,
+        right: theme.spacing.md,
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        backgroundColor: theme.colors.surface,
+        alignItems: 'center',
+        justifyContent: 'center',
+        ...theme.shadows.md,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.border,
+    },
+    addPlaceHint: {
+        position: 'absolute',
+        top: Platform.OS === 'ios' ? 100 : 70,
+        left: theme.spacing.md,
+        right: theme.spacing.md,
+        backgroundColor: theme.colors.primary,
+        paddingVertical: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.md,
+        borderRadius: theme.borderRadius.lg,
+        alignItems: 'center',
+        ...theme.shadows.md,
+    },
+    addPlaceHintText: {
         ...theme.typography.bodyBold,
+        color: '#FFFFFF',
+        fontSize: 14,
     },
     customMarker: {
         alignItems: 'center',
         justifyContent: 'center',
     },
     markerPin: {
-        width: 40,
-        height: 40,
-        borderRadius: 20,
+        width: 44,
+        height: 44,
+        borderRadius: 22,
         borderWidth: 3,
         borderColor: '#FFFFFF',
         alignItems: 'center',
         justifyContent: 'center',
-        ...theme.shadows.md,
+        ...theme.shadows.lg,
     },
-    markerRating: {
+    centerMarkerContainer: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        marginLeft: -20,
+        marginTop: -40,
+        alignItems: 'center',
+        justifyContent: 'center',
+        pointerEvents: 'none',
+        zIndex: 1000,
+    },
+    centerMarker: {
+        width: 40,
+        height: 40,
+        borderWidth: 3,
+        borderColor: theme.colors.primary,
+        borderRadius: 20,
+        backgroundColor: 'transparent',
+    },
+    centerMarkerDot: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        marginLeft: -4,
+        marginTop: -4,
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        backgroundColor: theme.colors.primary,
+    },
+    confirmLocationContainer: {
+        position: 'absolute',
+        bottom: Platform.OS === 'ios' ? 100 : 80,
+        left: theme.spacing.md,
+        right: theme.spacing.md,
+        zIndex: 1000,
+    },
+    confirmLocationContent: {
+        backgroundColor: theme.colors.surface,
+        borderRadius: theme.borderRadius.xl,
+        padding: theme.spacing.md,
+        ...theme.shadows.lg,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.border,
+    },
+    confirmLocationText: {
+        ...theme.typography.body,
+        color: theme.colors.text,
+        marginBottom: theme.spacing.md,
+        textAlign: 'center',
+    },
+    confirmLocationButtons: {
+        flexDirection: 'row',
+        gap: theme.spacing.sm,
+    },
+    confirmLocationCancel: {
+        flex: 1,
+        paddingVertical: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.md,
+        borderRadius: theme.borderRadius.lg,
+        backgroundColor: theme.colors.background,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        alignItems: 'center',
+    },
+    confirmLocationCancelText: {
         ...theme.typography.bodyBold,
-        fontSize: 14,
+        color: theme.colors.text,
+    },
+    confirmLocationButton: {
+        flex: 1,
+        paddingVertical: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.md,
+        borderRadius: theme.borderRadius.lg,
+        backgroundColor: theme.colors.primary,
+        alignItems: 'center',
+    },
+    confirmLocationButtonText: {
+        ...theme.typography.bodyBold,
         color: '#FFFFFF',
-        fontWeight: '700',
+    },
+    addPlaceButton: {
+        position: 'absolute',
+        bottom: Platform.OS === 'ios' ? 100 : 80,
+        right: theme.spacing.md,
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        backgroundColor: theme.colors.primary,
+        alignItems: 'center',
+        justifyContent: 'center',
+        ...theme.shadows.lg,
+        borderWidth: 2,
+        borderColor: '#FFFFFF',
     },
 });

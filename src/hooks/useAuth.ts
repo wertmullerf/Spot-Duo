@@ -84,6 +84,22 @@ export function useAuth() {
     }
   };
 
+  const signInWithGoogle = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const authenticatedUser = await services.auth.signInWithGoogle();
+      setUser(authenticatedUser);
+      return authenticatedUser;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('Error al autenticarse con Google');
+      setError(error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const updateProfile = async (updates: { name?: string; avatar_url?: string }) => {
     try {
       setLoading(true);
@@ -106,6 +122,7 @@ export function useAuth() {
     error,
     signIn,
     signUp,
+    signInWithGoogle,
     signOut,
     updateProfile,
     isAuthenticated: !!user,

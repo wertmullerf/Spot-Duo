@@ -2,6 +2,7 @@
   "expo": {
     "name": "Shared Reviews",
     "slug": "shared-reviews-app",
+    "scheme": "sharedreviews",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

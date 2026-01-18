@@ -167,9 +167,8 @@ export function GroupsListScreen({ navigation }: Props) {
                 >
                     <Ionicons
                         name="add-circle"
-                        size={20}
-                        color="#FFFFFF"
-                        style={{ marginRight: 8 }}
+                        size={22}
+                        color={theme.colors.primary}
                     />
                     <Text style={styles.actionButtonText}>Crear Grupo</Text>
                 </TouchableOpacity>
@@ -179,9 +178,8 @@ export function GroupsListScreen({ navigation }: Props) {
                 >
                     <Ionicons
                         name="link"
-                        size={20}
-                        color="#FFFFFF"
-                        style={{ marginRight: 8 }}
+                        size={22}
+                        color={theme.colors.secondary}
                     />
                     <Text style={styles.actionButtonText}>
                         Unirse con Código
@@ -296,23 +294,28 @@ const styles = StyleSheet.create({
     },
     actionButton: {
         flex: 1,
-        paddingVertical: theme.spacing.md + 2,
-        paddingHorizontal: theme.spacing.lg,
-        borderRadius: theme.borderRadius.lg,
+        paddingVertical: theme.spacing.md,
+        paddingHorizontal: theme.spacing.md,
+        borderRadius: theme.borderRadius.xl,
         alignItems: "center",
         justifyContent: "center",
         flexDirection: "row",
         gap: theme.spacing.xs,
+        borderWidth: StyleSheet.hairlineWidth,
+        ...theme.shadows.md,
     },
     createButton: {
-        backgroundColor: theme.colors.primary,
+        backgroundColor: theme.colors.surface,
+        borderColor: theme.colors.border,
     },
     joinButton: {
-        backgroundColor: theme.colors.secondary,
+        backgroundColor: theme.colors.surface,
+        borderColor: theme.colors.border,
     },
     actionButtonText: {
         ...theme.typography.bodyBold,
-        color: "#FFFFFF",
+        color: theme.colors.text,
+        fontSize: 15,
     },
     list: {
         padding: theme.spacing.md,
